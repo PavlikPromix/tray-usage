@@ -1,11 +1,21 @@
 # TrayUsage
 
-Оставшийся лимит Codex прямо в трее Windows 10/11. Переключение между 5 часами и неделей, время сброса по наведению, обновление раз в минуту. Один переносимый `.exe` без установщика.
+TrayUsage показывает, сколько лимита Codex осталось, прямо в трее Windows 10 и 11. Можно выбрать лимит на 5 часов или на неделю. Данные обновляются каждую минуту, а при наведении на значок видно время сброса обоих лимитов.
 
 ![Значки TrayUsage на тёмном и светлом фоне](docs/preview.png)
 
-**[Скачать TrayUsage.exe](https://github.com/PavlikPromix/tray-usage/releases/latest/download/TrayUsage.exe)** и запустить. Правый клик по значку — выбор лимита, обновление и выход.
+## Запуск
 
-Нужен вход в Codex через ChatGPT и файл `%USERPROFILE%\.codex\auth.json` (или `%CODEX_HOME%\auth.json`). Ключ API и хранение авторизации только в Credential Manager не поддерживаются. Утилита читает токен, не изменяя его; используется внутренний API ChatGPT.
+[Скачайте TrayUsage.exe](https://github.com/PavlikPromix/tray-usage/releases/latest/download/TrayUsage.exe) и запустите его. Установка не нужна. Приложение появится в трее рядом с часами; если значок скрыт, найдите его под стрелкой. Нажмите на значок правой кнопкой мыши, чтобы выбрать лимит, обновить данные или закрыть приложение.
 
-Сборка: `.\build.ps1` (MSVC + Windows SDK). Результат: `out\TrayUsage.exe`; тесты выполняются автоматически.
+Для работы нужно войти в Codex через аккаунт ChatGPT. TrayUsage читает файл авторизации `%USERPROFILE%\.codex\auth.json`. Если задана переменная `CODEX_HOME`, файл `auth.json` берётся из указанной в ней папки. Вход по API-ключу не поддерживается.
+
+## Сборка
+
+Установите Visual Studio Build Tools с поддержкой C++ и Windows SDK, затем выполните в PowerShell:
+
+```powershell
+.\build.ps1
+```
+
+Скрипт соберёт `out\TrayUsage.exe` и запустит тесты.
