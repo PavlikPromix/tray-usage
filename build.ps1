@@ -15,7 +15,7 @@ $commands = @(
     ('cd /d "{0}"' -f $output),
     ('rc /nologo /i "{0}\src" /fo app.res "{0}\src\app.rc"' -f $root),
     'if errorlevel 1 exit /b 1',
-    ('cl /nologo /std:c++17 /O1 /GL /MT /EHsc /W4 /WX /permissive- /utf-8 /GS /guard:cf /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_WIN32_WINNT=0x0A00 "{0}\src\main.cpp" app.res /Fe:TrayUsage.exe /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF,ICF /DYNAMICBASE /NXCOMPAT /guard:cf winhttp.lib shell32.lib user32.lib gdi32.lib advapi32.lib' -f $root),
+    ('cl /nologo /std:c++17 /O1 /GL /MT /EHsc /W4 /WX /permissive- /utf-8 /GS /guard:cf /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_WIN32_WINNT=0x0A00 "{0}\src\main.cpp" app.res /Fe:TrayUsage.exe /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF,ICF /DYNAMICBASE /NXCOMPAT /guard:cf winhttp.lib ws2_32.lib crypt32.lib shell32.lib user32.lib gdi32.lib advapi32.lib' -f $root),
     'if errorlevel 1 exit /b 1'
 )
 if (-not $SkipTests) {
@@ -24,9 +24,13 @@ if (-not $SkipTests) {
         'if errorlevel 1 exit /b 1',
         'usage_tests.exe',
         'if errorlevel 1 exit /b 1',
-        ('cl /nologo /std:c++17 /O2 /MT /EHsc /W4 /WX /permissive- /utf-8 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_WIN32_WINNT=0x0A00 "{0}\tests\native_tests.cpp" /Fe:native_tests.exe /link /SUBSYSTEM:CONSOLE winhttp.lib shell32.lib user32.lib gdi32.lib advapi32.lib' -f $root),
+        ('cl /nologo /std:c++17 /O2 /MT /EHsc /W4 /WX /permissive- /utf-8 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_WIN32_WINNT=0x0A00 "{0}\tests\native_tests.cpp" /Fe:native_tests.exe /link /SUBSYSTEM:CONSOLE winhttp.lib ws2_32.lib crypt32.lib shell32.lib user32.lib gdi32.lib advapi32.lib' -f $root),
         'if errorlevel 1 exit /b 1',
         'native_tests.exe',
+        'if errorlevel 1 exit /b 1',
+        ('cl /nologo /std:c++17 /O2 /MT /EHsc /W4 /WX /permissive- /utf-8 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_WIN32_WINNT=0x0A00 "{0}\tests\proxy_tests.cpp" /Fe:proxy_tests.exe /link /SUBSYSTEM:CONSOLE winhttp.lib ws2_32.lib crypt32.lib shell32.lib user32.lib gdi32.lib advapi32.lib' -f $root),
+        'if errorlevel 1 exit /b 1',
+        'proxy_tests.exe',
         'if errorlevel 1 exit /b 1'
     )
 }

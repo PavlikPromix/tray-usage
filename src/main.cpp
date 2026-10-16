@@ -1,4 +1,5 @@
-#include <windows.h>
+#include "socks5.h"
+#include "proxy_dialog.h"
 #include <windowsx.h>
 #include <shellapi.h>
 #include <winhttp.h>
@@ -17,6 +18,7 @@ constexpr wchar_t settingsKey[] = L"Software\\TrayUsage";
 constexpr UINT trayMessage = WM_APP + 1;
 constexpr UINT resultMessage = WM_APP + 2;
 constexpr UINT shortCommand = 1001, weekCommand = 1002, refreshCommand = 1003, exitCommand = 1004;
+constexpr UINT proxyCommand = 1005;
 constexpr DWORD pollMs = 60 * 1000;
 constexpr size_t maxBody = 1024 * 1024;
 
@@ -44,6 +46,7 @@ struct FetchResult {
     std::wstring error;
     DWORD retryMs = pollMs;
     std::time_t fetchedAt = 0;
+    unsigned settingsVersion = 0;
 };
 
 std::wstring environment(const wchar_t* name) {
@@ -75,8 +78,44 @@ bool headerSafe(const std::string& value) {
     return !value.empty() && value.size() < 32768 && std::all_of(value.begin(), value.end(), [](unsigned char c) { return c >= 0x21 && c <= 0x7e; });
 }
 std::wstring asciiWide(const std::string& value) { return std::wstring(value.begin(), value.end()); }
+bool sendRequest(HINTERNET request, const std::wstring& headers, const proxy::Config& config, DWORD& status, std::wstring& error) {
+    const bool credentials = config.type == proxy::Type::http && config.authenticate;
+    DWORD policy = WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH;
+    if (!WinHttpSetOption(request, WINHTTP_OPTION_AUTOLOGON_POLICY, &policy, sizeof(policy))) {
+        error = L"Не удалось настроить авторизацию WinHTTP"; return false;
+    }
+    if (credentials && !WinHttpSetCredentials(request, WINHTTP_AUTH_TARGET_PROXY, WINHTTP_AUTH_SCHEME_BASIC,
+                                              config.username.c_str(), config.password.c_str(), nullptr)) {
+        error = L"Не удалось настроить авторизацию HTTP-прокси"; return false;
+    }
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (!WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            !WinHttpReceiveResponse(request, nullptr)) {
+            const DWORD code = GetLastError();
+            if (code == ERROR_WINHTTP_RESEND_REQUEST) continue;
+            error = code == ERROR_WINHTTP_LOGIN_FAILURE ? L"HTTP-прокси: проверьте логин и пароль" : L"Ошибка сети (" + std::to_wstring(code) + L")";
+            return false;
+        }
+        DWORD size = sizeof(status);
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) {
+            error = L"Нет HTTP статуса"; return false;
+        }
+        if (status != 407) return true;
+        if (!credentials) { error = L"HTTP-прокси требует авторизацию — откройте «Прокси…»"; return false; }
+        DWORD supported = 0, first = 0, target = 0;
+        if (!WinHttpQueryAuthSchemes(request, &supported, &first, &target) || target != WINHTTP_AUTH_TARGET_PROXY) break;
+        DWORD scheme = 0;
+        for (const DWORD candidate : {WINHTTP_AUTH_SCHEME_NEGOTIATE, WINHTTP_AUTH_SCHEME_NTLM, WINHTTP_AUTH_SCHEME_DIGEST, WINHTTP_AUTH_SCHEME_BASIC}) {
+            if (supported & candidate) { scheme = candidate; break; }
+        }
+        if (!scheme || !WinHttpSetCredentials(request, WINHTTP_AUTH_TARGET_PROXY, scheme, config.username.c_str(), config.password.c_str(), nullptr)) break;
+    }
+    error = L"HTTP-прокси: авторизация не удалась"; return false;
+}
 FetchResult fetchUsage() {
     FetchResult result;
+    proxy::Config config;
+    if (!proxy::load(config, result.error)) return result;
     Secret<std::string> auth;
     if (!readAuth(auth)) { result.error = L"Нет auth.json — войдите в Codex"; return result; }
     const auto root = json::parse(auth.value);
@@ -87,9 +126,19 @@ FetchResult fetchUsage() {
         result.error = L"Нужен вход в Codex через ChatGPT";
         return result;
     }
-    HttpHandle session(WinHttpOpen(L"codex-cli (TrayUsage/1.0)", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!session.value || !WinHttpSetTimeouts(session.value, 4000, 4000, 4000, 4000)) {
+    std::unique_ptr<proxy::SocksBridge> bridge;
+    DWORD access = config.type == proxy::Type::direct ? WINHTTP_ACCESS_TYPE_NO_PROXY : WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY;
+    std::wstring proxyAddress;
+    if (config.type == proxy::Type::http) proxyAddress = proxy::endpoint(config);
+    if (config.type == proxy::Type::socks5) {
+        bridge = std::make_unique<proxy::SocksBridge>();
+        if (!bridge->start(config)) { result.error = L"Не удалось создать SOCKS5-туннель"; return result; }
+        proxyAddress = bridge->endpoint();
+    }
+    if (config.custom()) access = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
+    HttpHandle session(WinHttpOpen(L"codex-cli (TrayUsage/1.1.0)", access,
+                                  proxyAddress.empty() ? WINHTTP_NO_PROXY_NAME : proxyAddress.c_str(), WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session.value || !WinHttpSetTimeouts(session.value, 4000, 4000, 4000, 8000)) {
         result.error = L"Не удалось открыть WinHTTP"; return result;
     }
     HttpHandle connection(WinHttpConnect(session.value, L"chatgpt.com", INTERNET_DEFAULT_HTTPS_PORT, 0));
@@ -103,14 +152,10 @@ FetchResult fetchUsage() {
     }
     // Credentials only go to the fixed HTTPS origin. TLS verification stays enabled.
     Secret<std::wstring> headers{L"Authorization: Bearer " + asciiWide(token.value) + L"\r\nChatGPT-Account-Id: " + asciiWide(account) + L"\r\nAccept: application/json\r\nCache-Control: no-cache\r\n"};
-    if (!WinHttpSendRequest(request.value, headers.value.c_str(), static_cast<DWORD>(headers.value.size()),
-                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) || !WinHttpReceiveResponse(request.value, nullptr)) {
-        result.error = L"Ошибка сети (" + std::to_wstring(GetLastError()) + L")"; return result;
-    }
-    DWORD status = 0, statusSize = sizeof(status);
-    if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX)) {
-        result.error = L"Нет HTTP статуса"; return result;
+    DWORD status = 0;
+    if (!sendRequest(request.value, headers.value, config, status, result.error)) {
+        if (bridge) { const auto detail = bridge->error(); if (!detail.empty()) result.error = detail; }
+        return result;
     }
     if (status != 200) {
         if (status == 401) result.error = L"Сессия истекла — обновите вход в Codex";
@@ -236,6 +281,8 @@ struct App {
     WinHandle stop{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
     WinHandle refresh{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     std::atomic<bool> busy{false};
+    std::atomic<unsigned> settingsVersion{0};
+    std::atomic<bool> forceRefresh{false};
     std::mutex resultMutex;
     FetchResult pending;
     std::thread worker;
@@ -256,10 +303,14 @@ struct App {
                 const DWORD timeout = nextAttempt > now ? static_cast<DWORD>(std::min<ULONGLONG>(nextAttempt - now, MAXDWORD - 1)) : 0;
                 const DWORD event = WaitForMultipleObjects(2, events, FALSE, timeout);
                 if (event == WAIT_OBJECT_0 || event == WAIT_FAILED) return;
-                if (lastAttempt && GetTickCount64() - lastAttempt < 10000) continue;
+                const bool forced = forceRefresh.exchange(false);
+                if (!forced && lastAttempt && GetTickCount64() - lastAttempt < 10000) continue;
                 lastAttempt = GetTickCount64();
                 busy.store(true);
+                const unsigned version = settingsVersion.load();
                 auto result = fetchSafely();
+                result.settingsVersion = version;
+                if (settingsVersion.load() != version) { busy.store(false); nextAttempt = 0; continue; }
                 failures = result.ok ? 0 : std::min(failures + 1, 4U);
                 DWORD delay = result.ok ? pollMs : std::max(result.retryMs, pollMs * (1UL << (failures - 1)));
                 nextAttempt = GetTickCount64() + delay;
@@ -276,6 +327,7 @@ struct App {
     void receive() {
         FetchResult result;
         { std::lock_guard<std::mutex> lock(resultMutex); result = pending; }
+        if (result.settingsVersion != settingsVersion.load()) return;
         received = true;
         if (result.ok) { snapshot = result.snapshot; fetchedAt = result.fetchedAt; stale = false; error.clear(); }
         else { stale = true; error = result.error; }
@@ -323,6 +375,7 @@ struct App {
             AppendMenuW(popup, MF_STRING | MF_DISABLED, 0, (L"Обновлено " + time.substr(6)).c_str());
         }
         AppendMenuW(popup, MF_STRING | (busy.load() ? MF_GRAYED : 0), refreshCommand, busy.load() ? L"Обновляется…" : L"Обновить");
+        AppendMenuW(popup, MF_STRING, proxyCommand, L"Прокси…");
         AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(popup, MF_STRING, exitCommand, L"Выход");
         SetForegroundWindow(window);
@@ -355,6 +408,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case shortCommand: app->select(false); break;
         case weekCommand: app->select(true); break;
         case refreshCommand: if (!app->busy.load()) SetEvent(app->refresh.value); break;
+        case proxyCommand:
+            if (proxy::showDialog(window)) { ++app->settingsVersion; app->forceRefresh.store(true); SetEvent(app->refresh.value); }
+            break;
         case exitCommand: SendMessageW(window, WM_CLOSE, 0, 0); break;
         }
         return 0;
@@ -366,6 +422,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_QUERYENDSESSION: return TRUE;
     case WM_ENDSESSION: if (wParam) DestroyWindow(window); return 0;
     case WM_CLOSE:
+        if (const HWND popup = GetLastActivePopup(window); popup != window && GetWindow(popup, GW_OWNER) == window) EndDialog(popup, IDCANCEL);
         SetEvent(app->stop.value);
         if (app->trayAdded) { Shell_NotifyIconW(NIM_DELETE, &app->tray); app->trayAdded = false; }
         DestroyWindow(window); return 0;
